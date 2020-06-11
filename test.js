@@ -39,4 +39,7 @@ if (cluster.isMaster) {
     
     output = vh.hash2b1(Buffer.from('Test1234Test1234Test1234Test1234Test1234Test1234Test1234Test1234Test1234Test1234Test1234Test1234','utf8'));
     console.log(process.pid,'VerusHash2b1 Output', reverseHex(output.toString('hex')), '\n');
+
+    output = vh.hash2b2(Buffer.from('Test1234Test1234Test1234Test1234Test1234Test1234Test1234Test1234Test1234Test1234Test1234Test1234','utf8'));
+    console.log(process.pid,'VerusHash2b2 Output', reverseHex(output.toString('hex')), '\n');
 }
