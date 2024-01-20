@@ -9,6 +9,7 @@
     "bundleDependencies": true,
     "dependencies": {
         "bindings": "*",
+        "libsodium": "*",
         "nan": "*",
         "node-gyp": "*"
     }

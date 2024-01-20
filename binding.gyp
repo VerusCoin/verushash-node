@@ -23,7 +23,7 @@
                 "verushash.cc",
             ],
             "include_dirs": [
-                "<!(nodejs -e \"require('nan')\")",
+                "<!(node -e \"require('nan')\")",
             ],
             "defines": [
             ],
@@ -31,7 +31,7 @@
                 "-lsodium"
             ],
             "cflags_cc": [
-                "-std=c++11",
+                "-std=c++17",
                 "-Wl,--whole-archive",
                 "-fPIC",
                 "-fexceptions",
