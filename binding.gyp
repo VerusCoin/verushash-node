@@ -23,15 +23,19 @@
                 "verushash.cc",
             ],
             "include_dirs": [
-                "<!(nodejs -e \"require('nan')\")",
+                "shims",
+                ".",
+                "<!(node -e \"require('nan')\")",
             ],
             "defines": [
+                "ENABLE_VERUS_ISA",
             ],
             "libraries": [
                 "-lsodium"
             ],
             "cflags_cc": [
-                "-std=c++11",
+                "-std=c++14",
+                "-UNDEBUG",
                 "-Wl,--whole-archive",
                 "-fPIC",
                 "-fexceptions",
@@ -46,6 +50,7 @@
                 "-maes",
             ],
             "cflags": [
+                "-UNDEBUG",
                 "-Wl,--whole-archive",
                 "-fPIC",
                 "-fexceptions",
@@ -64,10 +69,20 @@
                     "-Wl,-rpath,./build/Release/",
                 ]
             },
+            "configurations": {
+                "Release": {
+                    "defines!": ["NDEBUG"]
+                },
+                "Debug": {
+                    "defines!": ["NDEBUG"]
+                }
+            },
             "conditions": [
                 ['OS=="mac"', {
                     'xcode_settings': {
-                        'GCC_ENABLE_CPP_EXCEPTIONS': 'YES'
+                        'GCC_ENABLE_CPP_EXCEPTIONS': 'YES',
+                        'CLANG_CXX_LANGUAGE_STANDARD': 'c++14',
+                        'GCC_PREPROCESSOR_DEFINITIONS!': ['NDEBUG=1']
                     }
                 }]
             ]

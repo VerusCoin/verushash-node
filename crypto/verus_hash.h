@@ -15,12 +15,12 @@ This provides the PoW hash function for Verus, enabling CPU mining.
 #include <vector>
 
 #include "uint256.h"
-#include "verus_clhash.h"
+#include "crypto/verus_clhash.h"
 
 extern "C" 
 {
-#include "haraka.h"
-#include "haraka_portable.h"
+#include "crypto/haraka.h"
+#include "crypto/haraka_portable.h"
 }
 
 class CVerusHash
@@ -67,7 +67,7 @@ class CVerusHash
 
     private:
         // only buf1, the first source, needs to be zero initialized
-        unsigned char buf1[64] = {0}, buf2[64];
+        alignas(32) unsigned char buf1[64] = {0}, buf2[64];
         unsigned char *curBuf = buf1, *result = buf2;
         size_t curPos = 0;
 };
@@ -84,7 +84,7 @@ class CVerusHashV2
 
         verusclhasher vclh;
 
-        CVerusHashV2(int solutionVerusion=SOLUTION_VERUSHHASH_V2) : vclh(VERUSKEYSIZE, solutionVerusion) {
+        CVerusHashV2(int solutionVersion=SOLUTION_VERUSHHASH_V2) : vclh(VERUSKEYSIZE, solutionVersion) {
             // we must have allocated key space, or can't run
             if (!verusclhasher_key.get())
             {

@@ -1,11 +1,11 @@
 /*
  * This uses variations of the clhash algorithm for Verus Coin, licensed
  * with the Apache-2.0 open source license.
- * 
+ *
  * Copyright (c) 2018 Michael Toutonghi
  * Distributed under the Apache 2.0 software license, available in the original form for clhash
  * here: https://github.com/lemire/clhash/commit/934da700a2a54d8202929a826e2763831bd43cf7#diff-9879d6db96fd29134fc802214163b95a
- * 
+ *
  * CLHash is a very fast hashing function that uses the
  * carry-less multiplication and SSE instructions.
  *
@@ -20,17 +20,40 @@
 #ifndef INCLUDE_VERUS_CLHASH_H
 #define INCLUDE_VERUS_CLHASH_H
 
-#ifndef _WIN32
-#include <cpuid.h>
-#include <x86intrin.h>
-#else
-#include <intrin.h>
-#endif // !WIN32
+#if defined(HAVE_CONFIG_H)
+#include "config/bitcoin-config.h"
+#endif
+
+
 
 #include <stdlib.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <assert.h>
+
+#ifdef _WIN32
+#undef __cpuid
+#include <intrin.h>
+#endif
+
+#if defined(__arm__)  || defined(__aarch64__)
+#define SSE2NEON_SUPPRESS_WARNINGS
+#if !defined(__clang__) && defined(__GNUC__) && __GNUC__ < 10
+#include "crypto/compat/sse2neon.h"
+#else
+#include "crypto/sse2neon.h"
+#endif
+#if !defined(__APPLE__)
+#include <sys/auxv.h>
+#include <asm/hwcap.h>
+#endif
+#else
+#include <cpuid.h>
+#include <x86intrin.h>
+#endif // !WIN32
+
+#include <boost/thread.hpp>
+#include "tinyformat.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -47,9 +70,10 @@ enum {
     // Any excess over a power of 2 will not get mutated, and any excess over
     // power of 2 + Haraka sized key will not be used
     VERUSKEYSIZE=1024 * 8 + (40 * 16),
-    SOLUTION_VERUSHHASH_V2 = 1,          // this must be in sync with CScript::SOLUTION_VERUSV2
-    SOLUTION_VERUSHHASH_V2_1 = 3,         // this must be in sync with CScript::ACTIVATE_VERUSHASH2_1
-	SOLUTION_VERUSHHASH_V2_2 = 4 
+    SOLUTION_VERUSHHASH_V2 = 1,         // this must be in sync with CActivationHeight::SOLUTION_VERUSV2
+    SOLUTION_VERUSHHASH_V2_1 = 3,       // this must be in sync with CActivationHeight::SOLUTION_VERUSV4
+    SOLUTION_VERUSHHASH_V2_2 = 4,       // this must be in sync with CActivationHeight::SOLUTION_VERUSV5
+    SOLUTION_VERUSHHASH_V2_3 = 9        // this must be in sync with CActivationHeight::SOLUTION_VERUSV9
 };
 
 struct verusclhash_descr
@@ -60,19 +84,23 @@ struct verusclhash_descr
 
 struct thread_specific_ptr {
     void *ptr;
-    thread_specific_ptr() { ptr = NULL; }
-    void reset(void *newptr = NULL)
+    thread_specific_ptr() { ptr = nullptr; }
+    void reset(void *newptr = nullptr)
     {
         if (ptr && ptr != newptr)
         {
+#if defined(_WIN32)
+            _aligned_free(ptr);
+#else
             std::free(ptr);
+#endif
         }
         ptr = newptr;
 
     }
     void *get() { return ptr; }
-#if defined(__APPLE__) || defined(_WIN32)
-    // horrible MingW and Mac with gcc thread local storage bug workaround
+#if defined(_WIN32)
+    // horrible MingW thread local storage bug workaround
     ~thread_specific_ptr();
 #else
     ~thread_specific_ptr() {
@@ -89,20 +117,27 @@ extern int __cpuverusoptimized;
 __m128i __verusclmulwithoutreduction64alignedrepeat(__m128i *randomsource, const __m128i buf[4], uint64_t keyMask, __m128i **pMoveScratch);
 __m128i __verusclmulwithoutreduction64alignedrepeat_sv2_1(__m128i *randomsource, const __m128i buf[4], uint64_t keyMask, __m128i **pMoveScratch);
 __m128i __verusclmulwithoutreduction64alignedrepeat_sv2_2(__m128i *randomsource, const __m128i buf[4], uint64_t keyMask, __m128i **pMoveScratch);
+__m128i __verusclmulwithoutreduction64alignedrepeat_sv2_3(__m128i *randomsource, const __m128i buf[4], uint64_t keyMask, __m128i **pMoveScratch);
 __m128i __verusclmulwithoutreduction64alignedrepeat_port(__m128i *randomsource, const __m128i buf[4], uint64_t keyMask, __m128i **pMoveScratch);
 __m128i __verusclmulwithoutreduction64alignedrepeat_sv2_1_port(__m128i *randomsource, const __m128i buf[4], uint64_t keyMask, __m128i **pMoveScratch);
 __m128i __verusclmulwithoutreduction64alignedrepeat_sv2_2_port(__m128i *randomsource, const __m128i buf[4], uint64_t keyMask, __m128i **pMoveScratch);
+__m128i __verusclmulwithoutreduction64alignedrepeat_sv2_3_port(__m128i *randomsource, const __m128i buf[4], uint64_t keyMask, __m128i **pMoveScratch);
 
 inline bool IsCPUVerusOptimized()
 {
-    #if defined(__arm__)  || defined(__aarch64__)
+    #if !defined(ENABLE_VERUS_ISA)
+    __cpuverusoptimized = false;
+    #elif defined(__arm__)  || defined(__aarch64__)
+    #if defined(__APPLE__)
+    __cpuverusoptimized = true;
+#else
     long hwcaps= getauxval(AT_HWCAP);
 
     if((hwcaps & HWCAP_AES) && (hwcaps & HWCAP_PMULL))
         __cpuverusoptimized = true;
     else
         __cpuverusoptimized = false;
-        
+#endif
     #else
     if (__cpuverusoptimized & 0x80)
     {
@@ -113,7 +148,8 @@ inline bool IsCPUVerusOptimized()
         }
         else
         {
-            __cpuverusoptimized = ((ecx & (bit_AVX | bit_AES | bit_PCLMUL)) == (bit_AVX | bit_AES | bit_PCLMUL));
+            const unsigned int required = bit_AES | bit_PCLMUL;
+            __cpuverusoptimized = (ecx & required) == required;
         }
     }
     #endif
@@ -128,9 +164,11 @@ inline void ForceCPUVerusOptimized(bool trueorfalse)
 uint64_t verusclhash(void * random, const unsigned char buf[64], uint64_t keyMask, __m128i **pMoveScratch);
 uint64_t verusclhash_port(void * random, const unsigned char buf[64], uint64_t keyMask, __m128i **pMoveScratch);
 uint64_t verusclhash_sv2_1(void * random, const unsigned char buf[64], uint64_t keyMask, __m128i **pMoveScratch);
-uint64_t verusclhash_sv2_1_port(void * random, const unsigned char buf[64], uint64_t keyMask, __m128i **pMoveScratch);
 uint64_t verusclhash_sv2_2(void * random, const unsigned char buf[64], uint64_t keyMask, __m128i **pMoveScratch);
+uint64_t verusclhash_sv2_3(void * random, const unsigned char buf[64], uint64_t keyMask, __m128i **pMoveScratch);
+uint64_t verusclhash_sv2_1_port(void * random, const unsigned char buf[64], uint64_t keyMask, __m128i **pMoveScratch);
 uint64_t verusclhash_sv2_2_port(void * random, const unsigned char buf[64], uint64_t keyMask, __m128i **pMoveScratch);
+uint64_t verusclhash_sv2_3_port(void * random, const unsigned char buf[64], uint64_t keyMask, __m128i **pMoveScratch);
 void *alloc_aligned_buffer(uint64_t bufSize);
 
 #ifdef __cplusplus
@@ -138,6 +176,32 @@ void *alloc_aligned_buffer(uint64_t bufSize);
 #endif
 
 #ifdef __cplusplus
+
+#include <vector>
+#include <string>
+#include <iostream>
+
+template <typename T>
+inline std::string LEToHex(const T &pt)
+{
+    std::stringstream ss;
+    for (int l = sizeof(T) - 1; l >= 0; l--)
+    {
+        ss << strprintf("%02x", *((unsigned char *)&pt + l));
+    }
+    return ss.str();
+}
+
+inline std::string HexBytes(const unsigned char *buf, int size)
+{
+    std::stringstream ss;
+    for (int l = 0; l < size; l++)
+    {
+        ss << strprintf("%02x", *(buf + l));
+    }
+    return ss.str();
+}
+
 // special high speed hasher for VerusHash 2.0
 struct verusclhasher {
     uint64_t keySizeInBytes;
@@ -158,14 +222,17 @@ struct verusclhasher {
     // align on 256 bit boundary at end
     verusclhasher(uint64_t keysize=VERUSKEYSIZE, int solutionVersion=SOLUTION_VERUSHHASH_V2) : keySizeInBytes((keysize >> 5) << 5)
     {
-#ifdef __APPLE__
-       __tls_init();
-#endif
+#if defined(ENABLE_VERUS_ISA)
         if (IsCPUVerusOptimized())
         {
             if (solutionVersion >= SOLUTION_VERUSHHASH_V2_1)
             {
-                if (solutionVersion >= SOLUTION_VERUSHHASH_V2_2)
+                if (solutionVersion >= SOLUTION_VERUSHHASH_V2_3)
+                {
+                    verusclhashfunction = &verusclhash_sv2_3;
+                    verusinternalclhashfunction = &__verusclmulwithoutreduction64alignedrepeat_sv2_3;
+                }
+                else if (solutionVersion >= SOLUTION_VERUSHHASH_V2_2)
                 {
                     verusclhashfunction = &verusclhash_sv2_2;
                     verusinternalclhashfunction = &__verusclmulwithoutreduction64alignedrepeat_sv2_2;
@@ -183,10 +250,16 @@ struct verusclhasher {
             }
         }
         else
+#endif
         {
             if (solutionVersion >= SOLUTION_VERUSHHASH_V2_1)
             {
-                if (solutionVersion >= SOLUTION_VERUSHHASH_V2_2)
+                if (solutionVersion >= SOLUTION_VERUSHHASH_V2_3)
+                {
+                    verusclhashfunction = &verusclhash_sv2_3_port;
+                    verusinternalclhashfunction = &__verusclmulwithoutreduction64alignedrepeat_sv2_3_port;
+                }
+                else if (solutionVersion >= SOLUTION_VERUSHHASH_V2_2)
                 {
                     verusclhashfunction = &verusclhash_sv2_2_port;
                     verusinternalclhashfunction = &__verusclmulwithoutreduction64alignedrepeat_sv2_2_port;
@@ -216,7 +289,7 @@ struct verusclhasher {
             (verusclhasher_key.reset((unsigned char *)alloc_aligned_buffer(keySizeInBytes << 1)), key = verusclhasher_key.get()))
         {
             verusclhash_descr *pdesc;
-            if (verusclhasher_descr.reset(new verusclhash_descr()), pdesc = (verusclhash_descr *)verusclhasher_descr.get())
+            if (verusclhasher_descr.reset((unsigned char *)alloc_aligned_buffer(sizeof(verusclhash_descr))), pdesc = (verusclhash_descr *)verusclhasher_descr.get())
             {
                 pdesc->keySizeInBytes = keySizeInBytes;
             }

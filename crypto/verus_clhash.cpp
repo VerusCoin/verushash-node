@@ -1,23 +1,24 @@
 /*
  * This uses veriations of the clhash algorithm for Verus Coin, licensed
  * with the Apache-2.0 open source license.
- * 
+ *
  * Copyright (c) 2018 Michael Toutonghi
  * Distributed under the Apache 2.0 software license, available in the original form for clhash
  * here: https://github.com/lemire/clhash/commit/934da700a2a54d8202929a826e2763831bd43cf7#diff-9879d6db96fd29134fc802214163b95a
- * 
+ *
  * Original CLHash code and any portions herein, (C) 2017, 2018 Daniel Lemire and Owen Kaser
  * Faster 64-bit universal hashing
  * using carry-less multiplications, Journal of Cryptographic Engineering (to appear)
  *
  * Best used on recent x64 processors (Haswell or better).
- * 
+ *
  * This implements an intermediate step in the last part of a Verus block hash. The intent of this step
  * is to more effectively equalize FPGAs over GPUs and CPUs.
  *
  **/
-
-#include "verus_hash.h"
+// The node block miner is omitted. It needs CBlockHeader and
+// CVerusHashV2bWriter, which this library does not build.
+#include "crypto/verus_hash.h"
 
 #include <assert.h>
 #include <string.h>
@@ -26,10 +27,14 @@
 #pragma warning (disable : 4146)
 #include <intrin.h>
 #endif
-int __cpuverusoptimized = 0x80;
 
 #if defined(__arm__)  || defined(__aarch64__)
-#include "crypto/SSE2NEON.h"
+#define SSE2NEON_SUPPRESS_WARNINGS
+#if !defined(__clang__) && defined(__GNUC__) && __GNUC__ < 10
+#include "crypto/compat/sse2neon.h"
+#else
+#include "crypto/sse2neon.h"
+#endif
 #else
 #include <x86intrin.h>
 #endif
@@ -37,114 +42,6 @@ int __cpuverusoptimized = 0x80;
 #ifdef _WIN32
 #define posix_memalign(p, a, s) (((*(p)) = _aligned_malloc((s), (a))), *(p) ?0 :errno)
 #endif
-
-thread_local thread_specific_ptr verusclhasher_key;
-thread_local thread_specific_ptr verusclhasher_descr;
-
-#if defined(__APPLE__) || defined(_WIN32)
-// attempt to workaround horrible mingw/gcc destructor bug on Windows and Mac, which passes garbage in the this pointer
-// we use the opportunity of control here to clean up all of our tls variables. we could keep a list, but this is a safe,
-// functional hack
-thread_specific_ptr::~thread_specific_ptr() {
-    if (verusclhasher_key.ptr)
-    {
-        verusclhasher_key.reset();
-    }
-    if (verusclhasher_descr.ptr)
-    {
-        verusclhasher_descr.reset();
-    }
-}
-#endif // defined(__APPLE__) || defined(_WIN32)
-#if defined(__arm__)  || defined(__aarch64__) //intrinsics not defined in SSE2NEON.h
-
-static inline __attribute__((always_inline)) __m128i _mm_set_epi64x(uint64_t hi, uint64_t lo)
-	{
-	__m128i result;
-	((uint64_t *)&result)[0] = lo;
-	((uint64_t *)&result)[1] = hi;
-	return result;
-	}
-
-static inline __attribute__((always_inline))  __m128i _mm_mulhrs_epi16(__m128i _a, __m128i _b)
-{
-	int16_t result[8];
-	int16_t *a = (int16_t*)&_a, *b = (int16_t*)&_b;
-	for (int i = 0; i < 8; i++)
-	{
-		result[i] = (int16_t)((((int32_t)(a[i]) * (int32_t)(b[i])) + 0x4000) >> 15);
-	}
-
-	return *(__m128i *)result;
-}
-
-__m128i _mm_cvtsi64_si128(uint64_t lo)
-{
-	__m128i result;
-	((uint64_t *)&result)[0] = lo;
-	((uint64_t *)&result)[1] = 0;
-	return result;
-}
-
- static inline __attribute__((always_inline)) uint8x16_t _mm_aesenc_si128 (uint8x16_t a, uint8x16_t RoundKey)
-{
-    return vaesmcq_u8(vaeseq_u8(a, (uint8x16_t){})) ^ RoundKey;
-}
-
-
- static inline __attribute__((always_inline))  __m128i _mm_clmulepi64_si128(const __m128i a, const __m128i &b, int imm)
-{
- return  (__m128i)vmull_p64(vgetq_lane_u64(a, 1), vgetq_lane_u64(b,0)); 
-
-}
-
-__m128i _mm_setr_epi8(u_char c0, u_char c1, u_char c2, u_char c3, u_char c4, u_char c5, u_char c6, u_char c7, u_char c8, u_char c9, u_char c10, u_char c11, u_char c12, u_char c13, u_char c14, u_char c15)
-{
-	__m128i result;
-	((uint8_t *)&result)[0] = c0;
-	((uint8_t *)&result)[1] = c1;
-	((uint8_t *)&result)[2] = c2;
-	((uint8_t *)&result)[3] = c3;
-	((uint8_t *)&result)[4] = c4;
-	((uint8_t *)&result)[5] = c5;
-	((uint8_t *)&result)[6] = c6;
-	((uint8_t *)&result)[7] = c7;
-	((uint8_t *)&result)[8] = c8;
-	((uint8_t *)&result)[9] = c9;
-	((uint8_t *)&result)[10] = c10;
-	((uint8_t *)&result)[11] = c11;
-	((uint8_t *)&result)[12] = c12;
-	((uint8_t *)&result)[13] = c13;
-	((uint8_t *)&result)[14] = c14;
-	((uint8_t *)&result)[15] = c15;
-		return result;
-}
-__m128i _mm_shuffle_epi8(__m128i a, __m128i b)
-{
-	__m128i result;
-	for (int i = 0; i < 16; i++)
-	{
-		if (((uint8_t *)&b)[i] & 0x80)
-		{
-			((uint8_t *)&result)[i] = 0;
-		}
-		else
-		{
-			((uint8_t *)&result)[i] = ((uint8_t *)&a)[((uint8_t *)&b)[i] & 0xf];
-		}
-	}
-	return result;
-}
- int64_t _mm_cvtsi128_si64(__m128i a)
-{
-	return ((int64_t *)&a)[0];
-}
-__m128i _mm_loadl_epi64(__m128i *a)
-{
-	__m128i b = {0}; ((uint64_t*)&b)[0] = ((uint64_t*)a)[0];
-	return b;
-}
-#endif 
 
 // multiply the length and the some key, no modulo
     static inline __attribute__((always_inline)) __m128i lazyLengthHash(uint64_t keylength, uint64_t length) {
@@ -210,6 +107,23 @@ __m128i _mm_loadl_epi64(__m128i *a)
   TRUNCSTORE(out, s[0], s[1], s[2], s[3]);
 }
 
+/*
+inline void fixupkey(__m128i **pMoveScratch, verusclhash_descr *pdesc)
+{
+    __m128i **ppfixup = pMoveScratch;
+    uint64_t fixupofs = (pdesc->keySizeInBytes >> 4);
+    for (__m128i *pfixup = *ppfixup; pfixup; pfixup = *++ppfixup)
+    {
+        *pfixup = *(pfixup + fixupofs);
+    }
+}
+*/
+
+
+// the masks every shipped binary computes for (0x10000000 << rounds) as a 32-bit int sign-extended to 64 bits,
+// written out so a compiler change cannot alter v2.0 hashes; rounds is selector >> 61, 0-7
+static const uint64_t roundSelectorMasks[8] = {0x10000000ULL, 0x20000000ULL, 0x40000000ULL, 0xffffffff80000000ULL, 0, 0, 0, 0};
+
 // verus intermediate hash extra
 __m128i __verusclmulwithoutreduction64alignedrepeat(__m128i *randomsource, const __m128i buf[4], uint64_t keyMask, __m128i **pMoveScratch)
 {
@@ -232,7 +146,7 @@ __m128i __verusclmulwithoutreduction64alignedrepeat(__m128i *randomsource, const
         __m128i *prandex = randomsource + ((selector >> 32) & keyMask);
 
         *(pMoveScratch++) = prand;
-        *(pMoveScratch++) = prandex;        
+        *(pMoveScratch++) = prandex;
 
         // select random start and order of pbuf processing
         pbuf = buf + (selector & 3);
@@ -397,7 +311,7 @@ __m128i __verusclmulwithoutreduction64alignedrepeat(__m128i *randomsource, const
 
                 do
                 {
-                    if (selector & (0x10000000 << rounds))
+                    if (selector & roundSelectorMasks[rounds])
                     {
                         onekey = _mm_load_si128(rc++);
                         const __m128i temp2 = _mm_load_si128(rounds & 1 ? pbuf : buftmp);
@@ -468,7 +382,7 @@ __m128i __verusclmulwithoutreduction64alignedrepeat(__m128i *randomsource, const
     return acc;
 }
 
-// hashes 64 bytes only by doing a carryless multiplication and reduction of the repeated 64 byte sequence 16 times, 
+// hashes 64 bytes only by doing a carryless multiplication and reduction of the repeated 64 byte sequence 16 times,
 // returning a 64 bit hash value
 uint64_t verusclhash(void * random, const unsigned char buf[64], uint64_t keyMask, __m128i **pMoveScratch) {
     __m128i  acc = __verusclmulwithoutreduction64alignedrepeat((__m128i *)random, (const __m128i *)buf, keyMask, pMoveScratch);
@@ -476,7 +390,7 @@ uint64_t verusclhash(void * random, const unsigned char buf[64], uint64_t keyMas
     return precompReduction64(acc);
 }
 
-// hashes 64 bytes only by doing a carryless multiplication and reduction of the repeated 64 byte sequence 16 times, 
+// hashes 64 bytes only by doing a carryless multiplication and reduction of the repeated 64 byte sequence 16 times,
 // returning a 64 bit hash value
 uint64_t verusclhash_sv2_1(void * random, const unsigned char buf[64], uint64_t keyMask, __m128i **pMoveScratch) {
     __m128i acc = __verusclmulwithoutreduction64alignedrepeat_sv2_1((__m128i *)random, (const __m128i *)buf, keyMask, pMoveScratch);
@@ -490,13 +404,16 @@ uint64_t verusclhash_sv2_2(void * random, const unsigned char buf[64], uint64_t 
     return precompReduction64(acc);
 }
 
-
-
+uint64_t verusclhash_sv2_3(void * random, const unsigned char buf[64], uint64_t keyMask, __m128i **pMoveScratch) {
+    __m128i acc = __verusclmulwithoutreduction64alignedrepeat_sv2_3((__m128i *)random, (const __m128i *)buf, keyMask, pMoveScratch);
+    acc = _mm_xor_si128(acc, lazyLengthHash(1024, 64));
+    return precompReduction64(acc);
+}
 
 __m128i __verusclmulwithoutreduction64alignedrepeat_sv2_1(__m128i *randomsource, const __m128i buf[4], uint64_t keyMask, __m128i **pMoveScratch)
 {
     const __m128i pbuf_copy[4] = {_mm_xor_si128(buf[0], buf[2]), _mm_xor_si128(buf[1], buf[3]), buf[2], buf[3]};
-    const __m128i *pbuf; 
+    const __m128i *pbuf;
 
     // divide key mask by 16 from bytes to __m128i
     keyMask >>= 4;
@@ -515,7 +432,7 @@ __m128i __verusclmulwithoutreduction64alignedrepeat_sv2_1(__m128i *randomsource,
         __m128i *prandex = randomsource + ((selector >> 32) & keyMask);
 
         *(pMoveScratch++) = prand;
-        *(pMoveScratch++) = prandex;        
+        *(pMoveScratch++) = prandex;
 
         // select random start and order of pbuf processing
         pbuf = pbuf_copy + (selector & 3);
@@ -716,7 +633,6 @@ __m128i __verusclmulwithoutreduction64alignedrepeat_sv2_1(__m128i *randomsource,
 
                 uint64_t rounds = selector >> 61; // loop randomly between 1 and 8 times
                 __m128i *rc = prand;
-                uint64_t aesroundoffset = 0;
                 __m128i onekey;
 
                 do
@@ -775,7 +691,7 @@ __m128i __verusclmulwithoutreduction64alignedrepeat_sv2_1(__m128i *randomsource,
     return acc;
 }
 
-__m128i __verusclmulwithoutreduction64alignedrepeat_sv2_2(__m128i *randomsource, const __m128i buf[4], uint64_t keyMask, __m128i **pMoveScratch)
+static inline __m128i verusclhash_sv2_2_loop(__m128i *randomsource, const __m128i buf[4], uint64_t keyMask, __m128i **pMoveScratch, bool v2_3)
 {
     const __m128i pbuf_copy[4] = {_mm_xor_si128(buf[0], buf[2]), _mm_xor_si128(buf[1], buf[3]), buf[2], buf[3]};
     const __m128i *pbuf;
@@ -797,7 +713,7 @@ __m128i __verusclmulwithoutreduction64alignedrepeat_sv2_2(__m128i *randomsource,
         __m128i *prandex = randomsource + ((selector >> 32) & keyMask);
 
         *(pMoveScratch++) = prand;
-        *(pMoveScratch++) = prandex;        
+        *(pMoveScratch++) = prandex;
 
         // select random start and order of pbuf processing
         pbuf = pbuf_copy + (selector & 3);
@@ -1048,27 +964,46 @@ __m128i __verusclmulwithoutreduction64alignedrepeat_sv2_2(__m128i *randomsource,
                 _mm_store_si128(prand, tempa2);
 
                 acc = _mm_xor_si128(tempa3, acc);
-                const __m128i temp4 = _mm_load_si128(pbuf - (((selector & 1) << 1) - 1)); 
-                acc = _mm_xor_si128(temp4,acc);  
+                const __m128i temp4 = _mm_load_si128(pbuf - (((selector & 1) << 1) - 1));
+                acc = _mm_xor_si128(temp4,acc);
                 const __m128i tempb1 = _mm_mulhrs_epi16(acc, tempa3);
                 const __m128i tempb2 = _mm_xor_si128(tempb1, tempa3);
                 _mm_store_si128(prandex, tempb2);
                 break;
             }
         }
+
+        if (v2_3)
+        {
+            // every case passes through here, so acc always changes. all four buffer lanes (including the
+            // nonce lanes [2..3]) feed the two clmuls, with the two key blocks just written at prand and prandex as the round key
+            const uint64_t pi = selector & 3;
+            const __m128i p = _mm_load_si128(pbuf_copy + pi);
+            const __m128i q = _mm_load_si128(pbuf_copy + (pi ^ 1));
+            const __m128i px = _mm_load_si128(pbuf_copy + (pi ^ 2));
+            const __m128i qx = _mm_load_si128(pbuf_copy + (pi ^ 3));
+            const __m128i rcst = _mm_set_epi64x(-1, i + 1);
+
+            // with the two key blocks just written at prand and prandex as the round key
+            const __m128i addp = _mm_xor_si128(_mm_xor_si128(p, qx), _mm_xor_si128(_mm_load_si128(prand), _mm_load_si128(prandex)));
+            const __m128i clp = _mm_clmulepi64_si128(addp, addp, 0x10);
+            const __m128i p2 = _mm_xor_si128(_mm_xor_si128(p, clp), rcst);
+
+            const __m128i addq = _mm_xor_si128(_mm_xor_si128(q, px), p2);
+            const __m128i clq = _mm_clmulepi64_si128(addq, addq, 0x10);
+
+            acc = _mm_xor_si128(acc, _mm_xor_si128(_mm_xor_si128(clp, clq), rcst));
+        }
     }
     return acc;
 }
 
-void *alloc_aligned_buffer(uint64_t bufSize)
+__m128i __verusclmulwithoutreduction64alignedrepeat_sv2_2(__m128i *randomsource, const __m128i buf[4], uint64_t keyMask, __m128i **pMoveScratch)
 {
-    void *answer = NULL;
-    if (posix_memalign(&answer, sizeof(__m128i)*2, bufSize))
-    {
-        return NULL;
-    }
-    else
-    {
-        return answer;
-    }
+    return verusclhash_sv2_2_loop(randomsource, buf, keyMask, pMoveScratch, false);
+}
+
+__m128i __verusclmulwithoutreduction64alignedrepeat_sv2_3(__m128i *randomsource, const __m128i buf[4], uint64_t keyMask, __m128i **pMoveScratch)
+{
+    return verusclhash_sv2_2_loop(randomsource, buf, keyMask, pMoveScratch, true);
 }

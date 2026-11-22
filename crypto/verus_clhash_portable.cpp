@@ -1,24 +1,25 @@
 /*
  * This uses veriations of the clhash algorithm for Verus Coin, licensed
  * with the Apache-2.0 open source license.
- * 
+ *
  * Copyright (c) 2018 Michael Toutonghi
  * Distributed under the Apache 2.0 software license, available in the original form for clhash
  * here: https://github.com/lemire/clhash/commit/934da700a2a54d8202929a826e2763831bd43cf7#diff-9879d6db96fd29134fc802214163b95a
- * 
+ *
  * Original CLHash code and any portions herein, (C) 2017, 2018 Daniel Lemire and Owen Kaser
  * Faster 64-bit universal hashing
  * using carry-less multiplications, Journal of Cryptographic Engineering (to appear)
  *
  * Best used on recent x64 processors (Haswell or better).
- * 
+ *
  * This implements an intermediate step in the last part of a Verus block hash. The intent of this step
  * is to more effectively equalize FPGAs over GPUs and CPUs.
  *
  **/
 
-
-#include "verus_hash.h"
+// The node block miner is omitted. It needs CBlockHeader and
+// CVerusHashV2bWriter, which this library does not build.
+#include "crypto/verus_hash.h"
 
 #include <assert.h>
 #include <string.h>
@@ -27,18 +28,57 @@
 #include <sys/types.h>
 #endif// APPLE
 
-#ifdef __linux__ 
+#ifdef __linux__
 
 #if defined(__i386__) || defined(__X86_64__)
 #include <x86intrin.h>
 #elif defined(__arm__) || defined(__aarch64__)
-#include "crypto/SSE2NEON.h"
-#endif 
+#define SSE2NEON_SUPPRESS_WARNINGS
+#if !defined(__clang__) && defined(__GNUC__) && __GNUC__ < 10
+#include "crypto/compat/sse2neon.h"
+#else
+#include "crypto/sse2neon.h"
+#endif
+#endif
 
 #elif _WIN32
 #pragma warning (disable : 4146)
 #include <intrin.h>
 #endif
+
+int __cpuverusoptimized = 0x80;
+
+thread_local thread_specific_ptr verusclhasher_key;
+thread_local thread_specific_ptr verusclhasher_descr;
+
+#if defined(_WIN32)
+// attempt to workaround horrible mingw/gcc destructor bug on Windows, which passes garbage in the this pointer
+// we use the opportunity of control here to clean up all of our tls variables. we could keep a list, but this is a safe,
+// functional hack
+thread_specific_ptr::~thread_specific_ptr() {
+    if (verusclhasher_key.ptr)
+    {
+        verusclhasher_key.reset();
+    }
+    if (verusclhasher_descr.ptr)
+    {
+        verusclhasher_descr.reset();
+    }
+}
+#endif // defined(_WIN32)
+
+void *alloc_aligned_buffer(uint64_t bufSize)
+{
+    void *answer = NULL;
+    if (posix_memalign(&answer, sizeof(__m128i)*2, bufSize))
+    {
+        return NULL;
+    }
+    else
+    {
+        return answer;
+    }
+}
 
 void clmul64(uint64_t a, uint64_t b, uint64_t* r)
 {
@@ -59,7 +99,7 @@ void clmul64(uint64_t a, uint64_t b, uint64_t* r)
     r[0] = u[a & smask]; //first window only affects lower word
     r[1] = 0;
     for(i = s ; i < 64 ; i += s){
-        tmp = u[a >> i & smask];     
+        tmp = u[a >> i & smask];
         r[0] ^= tmp << i;
         r[1] ^= tmp >> (64 - i);
     }
@@ -90,7 +130,7 @@ u128 _mm_clmulepi64_si128_emu(const __m128i &a, const __m128i &b, int imm)
     }
     else
     {
-        printf("_mm_clmulepi64_si128_emu: Portable version failed! a: %lxh %lxl, b: %lxh %lxl, imm: %x, emu: %lxh %lxl, intrin: %lxh %lxl\n", 
+        printf("_mm_clmulepi64_si128_emu: Portable version failed! a: %lxh %lxl, b: %lxh %lxl, imm: %x, emu: %lxh %lxl, intrin: %lxh %lxl\n",
                *((uint64_t *)&a + 1), *(uint64_t *)&a,
                *((uint64_t *)&b + 1), *(uint64_t *)&b,
                imm,
@@ -120,7 +160,7 @@ u128 _mm_mulhrs_epi16_emu(__m128i _a, __m128i _b)
     }
     else
     {
-        printf("_mm_mulhrs_epi16_emu: Portable version failed! a: %lxh %lxl, b: %lxh %lxl, emu: %lxh %lxl, intrin: %lxh %lxl\n", 
+        printf("_mm_mulhrs_epi16_emu: Portable version failed! a: %lxh %lxl, b: %lxh %lxl, emu: %lxh %lxl, intrin: %lxh %lxl\n",
                *((uint64_t *)&a + 1), *(uint64_t *)&a,
                *((uint64_t *)&b + 1), *(uint64_t *)&b,
                *((uint64_t *)result + 1), *(uint64_t *)result,
@@ -149,12 +189,12 @@ inline u128 _mm_cvtsi64_si128_emu(uint64_t lo)
 
 inline int64_t _mm_cvtsi128_si64_emu(const __m128i &a)
 {
-    return *(int64_t *)&a;
+    return *(const int64_t *)&a;
 }
 
 inline int32_t _mm_cvtsi128_si32_emu(const __m128i &a)
 {
-    return *(int32_t *)&a;
+    return *(const int32_t *)&a;
 }
 
 inline u128 _mm_cvtsi32_si128_emu(uint32_t lo)
@@ -239,7 +279,7 @@ inline __m128i _mm_srli_si128_emu(__m128i a, int imm8)
     }
     else
     {
-        printf("_mm_srli_si128_emu: Portable version failed! val: %lx%lx imm: %x emu: %lx%lx, intrin: %lx%lx\n", 
+        printf("_mm_srli_si128_emu: Portable version failed! val: %lx%lx imm: %x emu: %lx%lx, intrin: %lx%lx\n",
                *((uint64_t *)&a + 1), *(uint64_t *)&a,
                imm8,
                *((uint64_t *)result + 1), *(uint64_t *)result,
@@ -329,10 +369,21 @@ static inline uint64_t precompReduction64_port( __m128i A) {
     return _mm_cvtsi128_si64_emu(tmp);
 }
 
+// the masks every shipped binary computes for (0x10000000 << rounds) as a 32-bit int sign-extended to 64 bits,
+// written out so a compiler change cannot alter v2.0 hashes; rounds is selector >> 61, 0-7
+static const uint64_t roundSelectorMasks[8] = {0x10000000ULL, 0x20000000ULL, 0x40000000ULL, 0xffffffff80000000ULL, 0, 0, 0, 0};
+
 // verus intermediate hash extra
 __m128i __verusclmulwithoutreduction64alignedrepeat_port(__m128i *randomsource, const __m128i buf[4], uint64_t keyMask, __m128i **pMoveScratch)
 {
     __m128i const *pbuf;
+
+    /*
+    std::cout << "Random key start: ";
+    std::cout << LEToHex(*randomsource) << ", ";
+    std::cout << LEToHex(*(randomsource + 1));
+    std::cout << std::endl;
+    */
 
     // divide key mask by 16 from bytes to __m128i
     keyMask >>= 4;
@@ -344,6 +395,8 @@ __m128i __verusclmulwithoutreduction64alignedrepeat_port(__m128i *randomsource, 
 
     for (int64_t i = 0; i < 32; i++)
     {
+        //std::cout << "LOOP " << i << " acc: " << LEToHex(acc) << std::endl;
+
         const uint64_t selector = _mm_cvtsi128_si64_emu(acc);
 
         // get two random locations in the key, which will be mutated and swapped
@@ -365,6 +418,14 @@ __m128i __verusclmulwithoutreduction64alignedrepeat_port(__m128i *randomsource, 
                 const __m128i add1 = _mm_xor_si128_emu(temp1, temp2);
                 const __m128i clprod1 = _mm_clmulepi64_si128_emu(add1, add1, 0x10);
                 acc = _mm_xor_si128_emu(clprod1, acc);
+
+                /*
+                std::cout << "temp1: " << LEToHex(temp1) << std::endl;
+                std::cout << "temp2: " << LEToHex(temp2) << std::endl;
+                std::cout << "add1: " << LEToHex(add1) << std::endl;
+                std::cout << "clprod1: " << LEToHex(clprod1) << std::endl;
+                std::cout << "acc: " << LEToHex(acc) << std::endl;
+                */
 
                 const __m128i tempa1 = _mm_mulhrs_epi16_emu(acc, temp1);
                 const __m128i tempa2 = _mm_xor_si128_emu(tempa1, temp1);
@@ -517,9 +578,11 @@ __m128i __verusclmulwithoutreduction64alignedrepeat_port(__m128i *randomsource, 
 
                 do
                 {
+                    //std::cout << "acc: " << LEToHex(acc) << ", round check: " << LEToHex((selector & (0x10000000 << rounds))) << std::endl;
+
                     // note that due to compiler and CPUs, we expect this to do:
                     // if (selector & ((0x10000000 << rounds) & 0xffffffff) if rounds != 3 else selector & 0xffffffff80000000):
-                    if (selector & (0x10000000 << rounds))
+                    if (selector & roundSelectorMasks[rounds])
                     {
                         onekey = _mm_load_si128_emu(rc++);
                         const __m128i temp2 = _mm_load_si128_emu(rounds & 1 ? pbuf : buftmp);
@@ -534,7 +597,35 @@ __m128i __verusclmulwithoutreduction64alignedrepeat_port(__m128i *randomsource, 
                         const uint64_t roundidx = aesround++ << 2;
                         AES2_EMU(onekey, temp2, roundidx);
 
+                        /*
+                        std::cout << " onekey1: " << LEToHex(onekey) << std::endl;
+                        std::cout << "  temp21: " << LEToHex(temp2) << std::endl;
+                        std::cout << "roundkey: " << LEToHex(rc[roundidx]) << std::endl;
+
+                        aesenc((unsigned char *)&onekey, (unsigned char *)&(rc[roundidx]));
+
+                        std::cout << "onekey2: " << LEToHex(onekey) << std::endl;
+                        std::cout << "roundkey: " << LEToHex(rc[roundidx + 1]) << std::endl;
+
+                        aesenc((unsigned char *)&temp2, (unsigned char *)&(rc[roundidx + 1]));
+
+                        std::cout << " temp22: " << LEToHex(temp2) << std::endl;
+                        std::cout << "roundkey: " << LEToHex(rc[roundidx + 2]) << std::endl;
+
+                        aesenc((unsigned char *)&onekey, (unsigned char *)&(rc[roundidx + 2]));
+
+                        std::cout << "onekey2: " << LEToHex(onekey) << std::endl;
+
+                        aesenc((unsigned char *)&temp2, (unsigned char *)&(rc[roundidx + 3]));
+
+                        std::cout << " temp22: " << LEToHex(temp2) << std::endl;
+                        */
+
                         MIX2_EMU(onekey, temp2);
+
+                        /*
+                        std::cout << "onekey3: " << LEToHex(onekey) << std::endl;
+                        */
 
                         acc = _mm_xor_si128_emu(onekey, acc);
                         acc = _mm_xor_si128_emu(temp2, acc);
@@ -595,8 +686,8 @@ __m128i __verusclmulwithoutreduction64alignedrepeat_port(__m128i *randomsource, 
 // verus intermediate hash extra
 __m128i __verusclmulwithoutreduction64alignedrepeat_sv2_1_port(__m128i *randomsource, const __m128i buf[4], uint64_t keyMask, __m128i **pMoveScratch)
 {
-    const __m128i pbuf_copy[4] = {_mm_xor_si128(buf[0],buf[2]), _mm_xor_si128(buf[1],buf[3]), buf[2], buf[3]}; 
-    const  __m128i *pbuf; 
+    const __m128i pbuf_copy[4] = {_mm_xor_si128(buf[0],buf[2]), _mm_xor_si128(buf[1],buf[3]), buf[2], buf[3]};
+    const  __m128i *pbuf;
 
     // divide key mask by 16 from bytes to __m128i
     keyMask >>= 4;
@@ -608,6 +699,8 @@ __m128i __verusclmulwithoutreduction64alignedrepeat_sv2_1_port(__m128i *randomso
 
     for (int64_t i = 0; i < 32; i++)
     {
+        //std::cout << "LOOP " << i << " acc: " << LEToHex(acc) << std::endl;
+
         const uint64_t selector = _mm_cvtsi128_si64_emu(acc);
 
         // get two random locations in the key, which will be mutated and swapped
@@ -820,7 +913,6 @@ __m128i __verusclmulwithoutreduction64alignedrepeat_sv2_1_port(__m128i *randomso
 
                 uint64_t rounds = selector >> 61; // loop randomly between 1 and 8 times
                 __m128i *rc = prand;
-                uint64_t aesroundoffset = 0;
                 __m128i onekey;
 
                 do
@@ -868,7 +960,6 @@ __m128i __verusclmulwithoutreduction64alignedrepeat_sv2_1_port(__m128i *randomso
                 _mm_store_si128_emu(prand, tempa2);
 
                 acc = _mm_xor_si128_emu(tempa3, acc);
-
                 const __m128i tempb1 = _mm_mulhrs_epi16_emu(acc, tempa3);
                 const __m128i tempb2 = _mm_xor_si128_emu(tempb1, tempa3);
                 _mm_store_si128_emu(prandex, tempb2);
@@ -878,10 +969,12 @@ __m128i __verusclmulwithoutreduction64alignedrepeat_sv2_1_port(__m128i *randomso
     }
     return acc;
 }
-__m128i __verusclmulwithoutreduction64alignedrepeat_sv2_2_port(__m128i *randomsource, const __m128i buf[4], uint64_t keyMask, __m128i **pMoveScratch)
+
+// verus intermediate hash extra
+static inline __m128i verusclhash_sv2_2_loop_port(__m128i *randomsource, const __m128i buf[4], uint64_t keyMask, __m128i **pMoveScratch, bool v2_3)
 {
-    const __m128i pbuf_copy[4] = {_mm_xor_si128(buf[0],buf[2]), _mm_xor_si128(buf[1],buf[3]), buf[2], buf[3]}; 
-    const  __m128i *pbuf; 
+    const __m128i pbuf_copy[4] = {_mm_xor_si128(buf[0],buf[2]), _mm_xor_si128(buf[1],buf[3]), buf[2], buf[3]};
+    const  __m128i *pbuf;
 
     // divide key mask by 16 from bytes to __m128i
     keyMask >>= 4;
@@ -894,7 +987,7 @@ __m128i __verusclmulwithoutreduction64alignedrepeat_sv2_2_port(__m128i *randomso
     for (int64_t i = 0; i < 32; i++)
     {
         //std::cout << "LOOP " << i << " acc: " << LEToHex(acc) << std::endl;
-        
+
         const uint64_t selector = _mm_cvtsi128_si64_emu(acc);
 
         // get two random locations in the key, which will be mutated and swapped
@@ -1157,17 +1250,50 @@ __m128i __verusclmulwithoutreduction64alignedrepeat_sv2_2_port(__m128i *randomso
 
                 acc = _mm_xor_si128_emu(tempa3, acc);
                 const __m128i temp4 = _mm_load_si128_emu(pbuf - (((selector & 1) << 1) - 1));
-                acc = _mm_xor_si128_emu(temp4,acc);  
+                acc = _mm_xor_si128_emu(temp4,acc);
                 const __m128i tempb1 = _mm_mulhrs_epi16_emu(acc, tempa3);
                 const __m128i tempb2 = _mm_xor_si128_emu(tempb1, tempa3);
                 _mm_store_si128_emu(prandex, tempb2);
                 break;
             }
         }
+
+        if (v2_3)
+        {
+            // every case passes through here, so acc always changes. all four buffer lanes (including the
+            // nonce lanes [2..3]) feed the two clmuls, with the two key blocks just written at prand and prandex as the round key
+            const uint64_t pi = selector & 3;
+            const __m128i p = _mm_load_si128_emu(pbuf_copy + pi);
+            const __m128i q = _mm_load_si128_emu(pbuf_copy + (pi ^ 1));
+            const __m128i px = _mm_load_si128_emu(pbuf_copy + (pi ^ 2));
+            const __m128i qx = _mm_load_si128_emu(pbuf_copy + (pi ^ 3));
+            const __m128i rcst = _mm_set_epi64x_emu(-1, i + 1);
+
+            const __m128i addp = _mm_xor_si128_emu(_mm_xor_si128_emu(p, qx), _mm_xor_si128_emu(_mm_load_si128_emu(prand), _mm_load_si128_emu(prandex)));
+
+            const __m128i clp = _mm_clmulepi64_si128_emu(addp, addp, 0x10);
+            const __m128i p2 = _mm_xor_si128_emu(_mm_xor_si128_emu(p, clp), rcst);
+
+            const __m128i addq = _mm_xor_si128_emu(_mm_xor_si128_emu(q, px), p2);
+            const __m128i clq = _mm_clmulepi64_si128_emu(addq, addq, 0x10);
+
+            acc = _mm_xor_si128_emu(acc, _mm_xor_si128_emu(_mm_xor_si128_emu(clp, clq), rcst));
+        }
     }
     return acc;
 }
-// hashes 64 bytes only by doing a carryless multiplication and reduction of the repeated 64 byte sequence 16 times, 
+
+__m128i __verusclmulwithoutreduction64alignedrepeat_sv2_2_port(__m128i *randomsource, const __m128i buf[4], uint64_t keyMask, __m128i **pMoveScratch)
+{
+    return verusclhash_sv2_2_loop_port(randomsource, buf, keyMask, pMoveScratch, false);
+}
+
+__m128i __verusclmulwithoutreduction64alignedrepeat_sv2_3_port(__m128i *randomsource, const __m128i buf[4], uint64_t keyMask, __m128i **pMoveScratch)
+{
+    return verusclhash_sv2_2_loop_port(randomsource, buf, keyMask, pMoveScratch, true);
+}
+
+// hashes 64 bytes only by doing a carryless multiplication and reduction of the repeated 64 byte sequence 16 times,
 // returning a 64 bit hash value
 uint64_t verusclhash_port(void * random, const unsigned char buf[64], uint64_t keyMask, __m128i **pMoveScratch) {
     __m128i * rs64 = (__m128i *)random;
@@ -1178,7 +1304,7 @@ uint64_t verusclhash_port(void * random, const unsigned char buf[64], uint64_t k
     return precompReduction64_port(acc);
 }
 
-// hashes 64 bytes only by doing a carryless multiplication and reduction of the repeated 64 byte sequence 16 times, 
+// hashes 64 bytes only by doing a carryless multiplication and reduction of the repeated 64 byte sequence 16 times,
 // returning a 64 bit hash value
 uint64_t verusclhash_sv2_1_port(void * random, const unsigned char buf[64], uint64_t keyMask, __m128i **pMoveScratch) {
     __m128i * rs64 = (__m128i *)random;
@@ -1197,3 +1323,13 @@ uint64_t verusclhash_sv2_2_port(void * random, const unsigned char buf[64], uint
     acc = _mm_xor_si128_emu(acc, lazyLengthHash_port(1024, 64));
     return precompReduction64_port(acc);
 }
+
+uint64_t verusclhash_sv2_3_port(void * random, const unsigned char buf[64], uint64_t keyMask, __m128i **pMoveScratch) {
+    __m128i * rs64 = (__m128i *)random;
+    const __m128i * string = (const __m128i *) buf;
+
+    __m128i  acc = __verusclmulwithoutreduction64alignedrepeat_sv2_3_port(rs64, string, keyMask, pMoveScratch);
+    acc = _mm_xor_si128_emu(acc, lazyLengthHash_port(1024, 64));
+    return precompReduction64_port(acc);
+}
+
