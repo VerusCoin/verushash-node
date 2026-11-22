@@ -34,7 +34,7 @@
                 "-lsodium"
             ],
             "cflags_cc": [
-                "-std=c++14",
+                "-std=c++17",
                 "-UNDEBUG",
                 "-Wl,--whole-archive",
                 "-fPIC",
@@ -81,7 +81,7 @@
                 ['OS=="mac"', {
                     'xcode_settings': {
                         'GCC_ENABLE_CPP_EXCEPTIONS': 'YES',
-                        'CLANG_CXX_LANGUAGE_STANDARD': 'c++14',
+                        'CLANG_CXX_LANGUAGE_STANDARD': 'c++17',
                         'GCC_PREPROCESSOR_DEFINITIONS!': ['NDEBUG=1']
                     }
                 }]
