@@ -12,6 +12,8 @@ Implementation of the VerusHash V1, V2, V2.1, V2.2, and V2.3 hash algorithms as 
     npm install
     node test.js
 
+Node 10 through 22 compile as C++17. Node 23 and later compile as C++20, which those Node headers require.
+
 ## Example test.js output:
 
     'VerusHash1   Output' '2cd709e6569bd706f14a09e62042ddccfa63bd3725b21f35a8c98adbf4151184'

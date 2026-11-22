@@ -1,4 +1,7 @@
 {
+    "variables": {
+        "cpp_std": "<!(node -p \"Number(process.versions.node.split('.')[0]) >= 23 ? 'gnu++20' : 'c++17'\")"
+    },
     "targets": [
         {
             "target_name": "verushash",
@@ -34,7 +37,7 @@
                 "-lsodium"
             ],
             "cflags_cc": [
-                "-std=c++17",
+                "-std=<(cpp_std)",
                 "-UNDEBUG",
                 "-Wl,--whole-archive",
                 "-fPIC",
@@ -81,7 +84,7 @@
                 ['OS=="mac"', {
                     'xcode_settings': {
                         'GCC_ENABLE_CPP_EXCEPTIONS': 'YES',
-                        'CLANG_CXX_LANGUAGE_STANDARD': 'c++17',
+                        'CLANG_CXX_LANGUAGE_STANDARD': '<(cpp_std)',
                         'GCC_PREPROCESSOR_DEFINITIONS!': ['NDEBUG=1']
                     }
                 }]
