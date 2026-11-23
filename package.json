@@ -9,7 +9,7 @@
     "bundleDependencies": true,
     "dependencies": {
         "bindings": "*",
-        "nan": "*",
+        "nan": "2.30.0",
         "node-gyp": "*"
     }
 }
