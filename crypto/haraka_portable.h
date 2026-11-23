@@ -1,7 +1,16 @@
 #ifndef SPX_HARAKA_H
 #define SPX_HARAKA_H
 
+#if defined(__arm__) || defined(__aarch64__)
+#define SSE2NEON_SUPPRESS_WARNINGS
+#if !defined(__clang__) && defined(__GNUC__) && __GNUC__ < 10
+#include "crypto/compat/sse2neon.h"
+#else
+#include "crypto/sse2neon.h"
+#endif
+#else
 #include "immintrin.h"
+#endif
 
 #define NUMROUNDS 5
 
@@ -19,6 +28,17 @@ extern void aesenc(unsigned char *s, const unsigned char *rk);
   aesenc((unsigned char *)&s1, (unsigned char *)&(rc[rci + 1])); \
   aesenc((unsigned char *)&s0, (unsigned char *)&(rc[rci + 2])); \
   aesenc((unsigned char *)&s1, (unsigned char *)&(rc[rci + 3]));
+
+// Unused function. Triggers a shift-count-overflow warning on gcc 8 and above when cross compiling for aarch64
+/*
+static inline void mix2_emu(__m128i *s0, __m128i *s1)
+{
+    __m128i tmp;
+    tmp = (*s0 & 0xffffffff) | ((*s1 & 0xffffffff) << 32) | ((*s0 & 0xffffffff00000000) << 32) | ((*s1 & 0xffffffff00000000) << 64);
+    *s1 = ((*s0 >> 64) & 0xffffffff) | (((*s1 >> 64) & 0xffffffff) << 32) | (((*s0 >> 64) & 0xffffffff00000000) << 32) | (((*s1 >> 64) & 0xffffffff00000000) << 64);
+    *s0 = tmp;
+}
+*/
 
 typedef unsigned int uint32_t;
 
@@ -53,8 +73,8 @@ static inline __m128i _mm_unpackhi_epi32_emu(__m128i a, __m128i b)
 void load_constants_port();
 
 /* Tweak constants with seed */
-void tweak_constants(const unsigned char *pk_seed, const unsigned char *sk_seed, 
-	                 unsigned long long seed_length);
+void tweak_constants(const unsigned char *pk_seed, const unsigned char *sk_seed,
+              unsigned long long seed_length);
 
 /* Haraka Sponge */
 void haraka_S(unsigned char *out, unsigned long long outlen,

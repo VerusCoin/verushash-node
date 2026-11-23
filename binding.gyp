@@ -1,4 +1,7 @@
 {
+    "variables": {
+        "cpp_std": "<!(node -p \"Number(process.versions.node.split('.')[0]) >= 23 ? 'gnu++20' : 'c++17'\")"
+    },
     "targets": [
         {
             "target_name": "verushash",
@@ -23,15 +26,19 @@
                 "verushash.cc",
             ],
             "include_dirs": [
-                "<!(nodejs -e \"require('nan')\")",
+                "shims",
+                ".",
+                "<!(node -e \"require('nan')\")",
             ],
             "defines": [
+                "ENABLE_VERUS_ISA",
             ],
             "libraries": [
                 "-lsodium"
             ],
             "cflags_cc": [
-                "-std=c++11",
+                "-std=<(cpp_std)",
+                "-UNDEBUG",
                 "-Wl,--whole-archive",
                 "-fPIC",
                 "-fexceptions",
@@ -46,6 +53,7 @@
                 "-maes",
             ],
             "cflags": [
+                "-UNDEBUG",
                 "-Wl,--whole-archive",
                 "-fPIC",
                 "-fexceptions",
@@ -64,10 +72,20 @@
                     "-Wl,-rpath,./build/Release/",
                 ]
             },
+            "configurations": {
+                "Release": {
+                    "defines!": ["NDEBUG"]
+                },
+                "Debug": {
+                    "defines!": ["NDEBUG"]
+                }
+            },
             "conditions": [
                 ['OS=="mac"', {
                     'xcode_settings': {
-                        'GCC_ENABLE_CPP_EXCEPTIONS': 'YES'
+                        'GCC_ENABLE_CPP_EXCEPTIONS': 'YES',
+                        'CLANG_CXX_LANGUAGE_STANDARD': '<(cpp_std)',
+                        'GCC_PREPROCESSOR_DEFINITIONS!': ['NDEBUG=1']
                     }
                 }]
             ]

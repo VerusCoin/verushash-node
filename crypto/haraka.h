@@ -26,7 +26,16 @@ Optimized Implementations for Haraka256 and Haraka512
 #ifndef HARAKA_H_
 #define HARAKA_H_
 
+#if defined(__arm__)  || defined(__aarch64__)
+#define SSE2NEON_SUPPRESS_WARNINGS
+#if !defined(__clang__) && defined(__GNUC__) && __GNUC__ < 10
+#include "crypto/compat/sse2neon.h"
+#else
+#include "crypto/sse2neon.h"
+#endif
+#else // !WIN32
 #include "immintrin.h"
+#endif
 
 #define NUMROUNDS 5
 
@@ -104,10 +113,10 @@ extern u128 rc[40];
   s1 = _mm_unpacklo_epi32(s1, tmp);
 
 #define TRUNCSTORE(out, s0, s1, s2, s3) \
-  *(u64*)(out) = *(((u64*)&(s0) + 1)); \
-  *(u64*)(out + 8) = *(((u64*)&(s1) + 1)); \
-  *(u64*)(out + 16) = *(((u64*)&(s2) + 0)); \
-  *(u64*)(out + 24) = *(((u64*)&(s3) + 0));
+  *(u64*)(out) = *(((u64*)&s0 + 1)); \
+  *(u64*)(out + 8) = *(((u64*)&s1 + 1)); \
+  *(u64*)(out + 16) = *(((u64*)&s2 + 0)); \
+  *(u64*)(out + 24) = *(((u64*)&s3 + 0));
 
 void load_constants();
 void test_implementations();

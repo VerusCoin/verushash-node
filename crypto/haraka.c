@@ -23,9 +23,18 @@ SOFTWARE.
 
 Optimized Implementations for Haraka256 and Haraka512
 */
+#if defined(__arm__)  || defined(__aarch64__)
+#define SSE2NEON_SUPPRESS_WARNINGS
+#if !defined(__clang__) && defined(__GNUC__) && __GNUC__ < 10
+#include "crypto/compat/sse2neon.h"
+#else
+#include "crypto/sse2neon.h"
+#endif
+#endif
 
 #include <stdio.h>
-#include "haraka.h"
+#include "crypto/haraka.h"
+#include <stdlib.h>
 
 u128 rc[40];
 u128 rc0[40] = {0};

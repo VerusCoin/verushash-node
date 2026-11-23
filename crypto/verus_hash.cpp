@@ -1,4 +1,4 @@
-// (C) 2018 The Verus Developers
+// (C) 2023 The Verus Developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -9,8 +9,8 @@ inputs only, Verus Hash takes any length of input and produces a 256
 bit output.
 */
 #include <string.h>
-#include "common.h"
-#include "verus_hash.h"
+#include "crypto/common.h"
+#include "crypto/verus_hash.h"
 
 void (*CVerusHash::haraka512Function)(unsigned char *out, const unsigned char *in);
 
@@ -49,11 +49,13 @@ void CVerusHash::Hash(void *result, const void *data, size_t _len)
 
 void CVerusHash::init()
 {
+#if defined(ENABLE_VERUS_ISA)
     if (IsCPUVerusOptimized())
     {
         haraka512Function = &haraka512_zero;
     }
     else
+#endif
     {
         haraka512Function = &haraka512_port_zero;
     }
@@ -101,6 +103,7 @@ void (*CVerusHashV2::haraka256Function)(unsigned char *out, const unsigned char 
 
 void CVerusHashV2::init()
 {
+#if defined(ENABLE_VERUS_ISA)
     if (IsCPUVerusOptimized())
     {
         load_constants();
@@ -109,6 +112,7 @@ void CVerusHashV2::init()
         haraka256Function = &haraka256;
     }
     else
+#endif
     {
         // load the haraka constants
         load_constants_port();
@@ -155,7 +159,7 @@ CVerusHashV2 &CVerusHashV2::Write(const unsigned char *data, size_t len)
     unsigned char *tmp;
 
     // digest up to 32 bytes at a time
-    for (int pos = 0; pos < len; )
+    for ( int pos = 0; pos < len; )
     {
         int room = 32 - curPos;
 
